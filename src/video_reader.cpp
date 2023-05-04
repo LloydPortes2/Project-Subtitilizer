@@ -1,18 +1,16 @@
-extern "C" {
-#include <libavformat/avformat.h>
-#include <libavcodec/avcodec.h>
-#include <libswscale/swscale.h>
-#include <inttypes.h>
-}
-
-bool load_frame(const char* filename, int* width_out, int* height_out, unsigned char** data_out) {
-
-
-	AVFormatContext* av_format_ctx;
-	AVCodecContext* av_codec_ctx;
-	AVFrame* av_frame;
-	AVPacket* av_packet;
-	SwsContext* sws_scaler_ctx;
+#include "video_reader.hpp"
+bool video_reader_open(VideoReaderState* state, const char* filename) {
+	
+	//unpack members of state
+	auto& width = state->width;
+	auto& height = state->height;
+	auto& time_base =state->time_base;
+	auto& av_format_ctx = state->av_format_ctx;
+	auto& av_codec_ctx = state->av_codec_ctx;
+	auto& av_frame = state->av_frame;
+	auto& av_packet = state->av_packet;
+	auto& video_stream_index = state->video_stream_index;
+	
 
 	printf("Beginning to encode\n");
 	// declare format and codec contexts, also codec for decoding
@@ -22,14 +20,13 @@ bool load_frame(const char* filename, int* width_out, int* height_out, unsigned 
 	const AVCodec* av_codec = nullptr;
 
 	const AVCodec* Codec = NULL;
-	int ret = 0;
-	int video_stream_index = -1;
+	video_stream_index = -1;
 
 	AVFrame* frame = NULL;
 	AVPacket* packet = NULL;
 
+	//open input file
 	av_format_ctx = avformat_alloc_context();
-
 	if (!av_format_ctx) {
 		printf("Couldn't create AVFormatContext\n");
 		return false;
@@ -41,9 +38,8 @@ bool load_frame(const char* filename, int* width_out, int* height_out, unsigned 
 	}
 
 	// get video stream index
-	for (int i = 0; i < av_format_ctx->nb_streams; i++)
-	{
-		//auto stream = av_format_ctx->streams[i];
+	for (int i = 0; i < av_format_ctx->nb_streams; i++){
+		AVStream* av_stream = av_format_ctx->streams[i];
 		av_codec_params = av_format_ctx->streams[i]->codecpar;
 		av_codec = avcodec_find_decoder(av_codec_params->codec_id);
 
@@ -52,6 +48,9 @@ bool load_frame(const char* filename, int* width_out, int* height_out, unsigned 
 		}
 		if (av_codec_params->codec_type == AVMEDIA_TYPE_VIDEO) {
 			video_stream_index = i;
+			width = av_codec_params->width;
+			height = av_codec_params->height;
+			time_base =av_format_ctx->streams[i]->time_base;
 			break;
 		}
 	}
@@ -95,38 +94,25 @@ bool load_frame(const char* filename, int* width_out, int* height_out, unsigned 
 		return false;
 	}
 
+	return true;
+}
 
-	// set output parameters
-	//*width_out = av_codec_ctx->width;
-	//*height_out = av_codec_ctx->height;
+bool video_reader_read_frame(VideoReaderState* state, uint8_t* frame_buffer, int64_t* pts) {
+	auto& width = state->width;
+	auto& height = state->height;
+	auto& av_format_ctx = state->av_format_ctx;
+	auto& av_codec_ctx = state->av_codec_ctx;
+	auto& av_frame = state->av_frame;
+	auto& av_packet = state->av_packet;
+	auto& video_stream_index = state->video_stream_index;
+	auto& sws_scaler_ctx = state->sws_scaler_ctx;
 
 
-	if (*data_out == NULL) {
-		printf("Couldn't allocate memory for output data\n");
-		return false;
-	}
-
-
-	//printf("\n");
-	// av_packet = av_packet_alloc();
-	//// Read packets from input file
-	//ret = av_read_frame(av_format_ctx, av_packet);
-	//if (ret < 0) {
-	//	printf("Error reading frame: %s\n");
-	//	return false;
-	//}
-
-	//printf("Packet data: ");
-	//for (int i = 0; i < av_packet->size; i++) {
-	//	printf("%02x ", av_packet->data[i]);
-	//}
-	//printf("\n");
-
+	//Decodes one frame
 	int response;
-	// encode each frame
-	//int frame_count = 0;
 	while (av_read_frame(av_format_ctx, av_packet) >= 0) {
 		if (av_packet->stream_index != video_stream_index) {
+			av_packet_unref(av_packet);
 			continue;
 		}
 		response = avcodec_send_packet(av_codec_ctx, av_packet);
@@ -136,10 +122,11 @@ bool load_frame(const char* filename, int* width_out, int* height_out, unsigned 
 			printf("Failed to decode packet1: %s\n", errbuf);
 			return false;
 		}
-		
+
 		response = avcodec_receive_frame(av_codec_ctx, av_frame);
 		if (response == AVERROR(EAGAIN) || response == AVERROR_EOF) {
-				continue;
+			av_packet_unref(av_packet);
+			continue;
 		}
 		else if (response < 0) {
 			char errbuf[AV_ERROR_MAX_STRING_SIZE];
@@ -147,37 +134,49 @@ bool load_frame(const char* filename, int* width_out, int* height_out, unsigned 
 			printf("Failed to decode packet2: %s\n", errbuf);
 			return false;
 		}
-		
+
 
 		av_packet_unref(av_packet);
+		break;
 	}
 
-	uint8_t* data = new uint8_t[av_frame->width * av_frame->height * 4];
+	*pts = av_frame->pts;
 
-	sws_scaler_ctx = sws_getContext(av_frame->width, av_frame->height, av_codec_ctx->pix_fmt, 
-												av_frame->width, av_frame->height, AV_PIX_FMT_RGB0, 
-												SWS_BILINEAR, NULL, NULL,NULL);
+	printf(
+		"Frame %c (%d) pts %d dts %d key_frame %d [coded_picture_number %d, display_picture_number %d\n]",
+		av_get_picture_type_char(av_frame->pict_type),
+		av_codec_ctx->frame_number,
+		av_frame->pts,
+		av_frame->pkt_dts,
+		av_frame->key_frame,
+		av_frame->coded_picture_number,
+		av_frame->display_picture_number
+	);
+	// Sets up sws scaler
+	if (!sws_scaler_ctx) {
+		sws_scaler_ctx = sws_getContext(width, height, av_codec_ctx->pix_fmt,
+										width, height, AV_PIX_FMT_RGB0,
+										SWS_BILINEAR, NULL, NULL, NULL);
+	}
+
 	if (!sws_scaler_ctx) {
 		printf("couldn't initialize sws scaler\n");
 		return false;
 	}
-	uint8_t* dest[4] = { data, NULL, NULL, NULL };
+
+	uint8_t* dest[4] = { frame_buffer, NULL, NULL, NULL };
 	int dest_linesize[4] = { av_frame->width * 4, 0, 0, 0 };
 	sws_scale(sws_scaler_ctx, av_frame->data, av_frame->linesize, 0, av_frame->height, dest, dest_linesize);
-	sws_freeContext(sws_scaler_ctx);
-
-	*width_out = av_frame->width;
-	*height_out = av_frame->height;
-	*data_out = data;
-
-
-
-	// clean up
-	avformat_close_input(&av_format_ctx);
-	av_frame_free(&av_frame);
-	av_packet_free(&av_packet);
-	avcodec_free_context(&av_codec_ctx);
 
 	return true;
+
+}
+void video_reader_close(VideoReaderState* state) {
+	sws_freeContext(state->sws_scaler_ctx);
+	avformat_close_input(&state->av_format_ctx);
+	avformat_free_context(state->av_format_ctx);
+	av_frame_free(&state->av_frame);
+	av_packet_free(&state->av_packet);
+	avcodec_free_context(&state->av_codec_ctx);
 
 }

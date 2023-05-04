@@ -23,6 +23,8 @@ endif()
 list (APPEND SOURCES
 			src/main.cpp
 			src/load_frame.cpp
+			src/video_reader.cpp
+			src/video_reader.hpp
 )
 add_executable(Project2 ${SOURCES})
 target_link_libraries(Project2 glfw ${EXTRA_LIBS} ${OPENGL_gl_LIBRARY})

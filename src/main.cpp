@@ -1,10 +1,7 @@
 #include <stdio.h>
 #include <GLFW/glfw3.h>
-#include <libavformat/avformat.h>
-#include <libavutil/dict.h>
-#include <libswscale/swscale.h>
+#include "video_reader.hpp"
 
-bool load_frame(const char* filename, int* width, int* height, unsigned char ** data);
 
 int main(int argc, const char** argv) {
 	GLFWwindow* window;
@@ -19,14 +16,15 @@ int main(int argc, const char** argv) {
 		printf("Couldn't open Window\n");
 	}
 
-int frame_width, frame_height;
-unsigned char* frame_data;
-if (!load_frame("C:\\Users\\porte\\OneDrive\\Pictures\\Camera Roll\\WIN_20230501_18_57_06_Pro.mp4", &frame_width, &frame_height, &frame_data)){
-	printf("loaded video frame\n");
-	return 1;
-}
+	
+	//read a new frame and load into texture
+	VideoReaderState vr_state;
+	if (!video_reader_open(&vr_state, "D:\\Youtube Videos\\Needs Edtiting\\[Reaktor] Fullmetal Alchemist Brotherhood - E01 v2 [1080p][x265][10-bit][Dual-Audio].mkv")) {
+		printf("couldn't open file\n");
+			return 1;
+	}
+	//Generates texture
 	glfwMakeContextCurrent(window);
-
 	GLuint tex_handle;
 	glGenTextures(1, &tex_handle);
 	glBindTexture(GL_TEXTURE_2D, tex_handle);
@@ -36,8 +34,15 @@ if (!load_frame("C:\\Users\\porte\\OneDrive\\Pictures\\Camera Roll\\WIN_20230501
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-	glTexImage2D(GL_TEXTURE_2D, 0 , GL_RGB, frame_width, frame_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, frame_data);
 
+	//allocates frame buffer
+	const int frame_width =vr_state.width;
+	const int frame_height = vr_state.height;
+	uint8_t* frame_data = new uint8_t[frame_width * frame_height * 4];
+
+	
+	double first_first_time;
+	glfwGetTime();
 
 	while (!glfwWindowShouldClose(window)) {
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -51,6 +56,30 @@ if (!load_frame("C:\\Users\\porte\\OneDrive\\Pictures\\Camera Roll\\WIN_20230501
 		glMatrixMode(GL_MODELVIEW);
 		int x_center = window_width / 2 - frame_width / 2;
 		int y_center = window_height / 2 - frame_height / 2;
+		
+		int64_t pts;
+		if (!video_reader_read_frame(&vr_state, frame_data, &pts)) {
+			printf("couldn't read frame\n");
+			return 1;
+		}
+
+		static bool first_frame = true;
+		if (first_frame) {
+			glfwSetTime(0.0);
+			first_frame = false;
+		}
+
+		//double time = glfwGetTime();
+		double pt_in_seconds = pts * (double)vr_state.time_base.num / (double)vr_state.time_base.den;
+		double glfw_time;
+		while (pt_in_seconds > glfwGetTime()) {
+			glfwWaitEventsTimeout(pt_in_seconds - glfwGetTime());
+		}
+
+		glBindTexture(GL_TEXTURE_2D, tex_handle);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, frame_width, frame_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, frame_data);
+
+
 		//renderer
 		glEnable(GL_TEXTURE_2D);
 		glBindTexture(GL_TEXTURE_2D, tex_handle);
@@ -64,5 +93,7 @@ if (!load_frame("C:\\Users\\porte\\OneDrive\\Pictures\\Camera Roll\\WIN_20230501
 		glfwSwapBuffers(window);
 		glfwWaitEvents();
 	}
+
+	video_reader_close(&vr_state);
 	return 0;
 }
